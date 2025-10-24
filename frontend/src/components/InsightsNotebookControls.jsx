@@ -6,6 +6,7 @@ const InsightsNotebookControls = ({ onInsightsLoaded }) => {
   const [currentRunId, setCurrentRunId] = useState('')
   const [statusMessage, setStatusMessage] = useState('')
   const [notebookInsights, setNotebookInsights] = useState(null)
+  const [pollingInterval, setPollingInterval] = useState(null)
 
   const runInsightsNotebook = async () => {
     setInsightsStatus('starting')
@@ -21,67 +22,68 @@ const InsightsNotebookControls = ({ onInsightsLoaded }) => {
         setStatusMessage('Insights Notebook started! Waiting for completion...')
         
         // Start polling for completion and results
-        pollInsightsResults(response.data.run_id)
+        startPolling(response.data.run_id)
+      } else {
+        setInsightsStatus('error')
+        setStatusMessage('Failed to start insights notebook: ' + response.data.message)
       }
     } catch (err) {
       setInsightsStatus('error')
-      setStatusMessage('Failed to start insights notebook: ' + err.response?.data?.message)
+      setStatusMessage('Failed to start insights notebook: ' + err.response?.data?.message || err.message)
     }
   }
 
-  const pollInsightsResults = async (runId) => {
-    const maxAttempts = 60 // 5 minutes max
-    let attempts = 0
-    
-    const checkStatusAndResults = async () => {
+  const startPolling = (runId) => {
+    // Clear any existing interval
+    if (pollingInterval) {
+      clearInterval(pollingInterval)
+    }
+
+    const interval = setInterval(async () => {
       try {
-        // First check if the run is complete
-        const statusResponse = await axios.get(`/api/pipeline/status-real/${runId}`)
+        const response = await axios.get(`/api/pipeline/get-insights-output/${runId}`)
         
-        if (statusResponse.data.status === 'success') {
-          const state = statusResponse.data.life_cycle_state
-          const result = statusResponse.data.result_state
+        if (response.data.status === 'running') {
+          setStatusMessage(`Insights Notebook status: ${response.data.life_cycle_state} - ${response.data.message}`)
+        } else if (response.data.status === 'success') {
+          // Notebook completed successfully
+          clearInterval(interval)
+          setPollingInterval(null)
+          setInsightsStatus('success')
+          setNotebookInsights(response.data.insights)
+          setStatusMessage('Insights loaded successfully!')
           
-          setStatusMessage(`Insights Notebook status: ${state}${result ? ` - ${result}` : ''}`)
-          
-          if (state === 'TERMINATED') {
-            if (result === 'SUCCESS') {
-              // Notebook completed successfully, now get the output
-              setStatusMessage('Notebook completed! Fetching insights...')
-              await fetchInsightsOutput(runId)
-            } else {
-              setInsightsStatus('error')
-              setStatusMessage(`Insights Notebook failed: ${statusResponse.data.state_message || 'Unknown error'}`)
-            }
-            return
+          // Pass insights to parent component
+          if (onInsightsLoaded) {
+            onInsightsLoaded(response.data.insights)
           }
-          
-          // Continue polling if still running
-          if (attempts < maxAttempts && state === 'RUNNING') {
-            attempts++
-            setTimeout(checkStatusAndResults, 5000) // Check every 5 seconds
-          } else if (attempts >= maxAttempts) {
-            setInsightsStatus('timeout')
-            setStatusMessage('Insights Notebook execution timeout')
-          }
+        } else if (response.data.status === 'error') {
+          // Notebook failed
+          clearInterval(interval)
+          setPollingInterval(null)
+          setInsightsStatus('error')
+          setStatusMessage('Insights Notebook failed: ' + response.data.message)
         }
       } catch (err) {
-        setInsightsStatus('error')
-        setStatusMessage('Error checking insights notebook status: ' + err.message)
+        console.error('Polling error:', err)
+        setStatusMessage('Error checking notebook status: ' + err.message)
       }
-    }
-    
-    checkStatusAndResults()
+    }, 3000) // Check every 3 seconds
+
+    setPollingInterval(interval)
   }
 
-  const fetchInsightsOutput = async (runId) => {
+  const refreshInsights = async () => {
+    setInsightsStatus('refreshing')
+    setStatusMessage('Refreshing insights from tables...')
+    
     try {
-      const response = await axios.get(`/api/pipeline/get-insights-output/${runId}`)
+      const response = await axios.post('/api/pipeline/refresh-insights')
       
       if (response.data.status === 'success') {
         setInsightsStatus('success')
         setNotebookInsights(response.data.insights)
-        setStatusMessage('Insights loaded successfully from notebook!')
+        setStatusMessage('Insights refreshed successfully!')
         
         // Pass insights to parent component
         if (onInsightsLoaded) {
@@ -89,13 +91,29 @@ const InsightsNotebookControls = ({ onInsightsLoaded }) => {
         }
       } else {
         setInsightsStatus('error')
-        setStatusMessage('Failed to fetch insights output: ' + response.data.message)
+        setStatusMessage('Failed to refresh insights: ' + response.data.message)
       }
     } catch (err) {
       setInsightsStatus('error')
-      setStatusMessage('Error fetching insights output: ' + err.message)
+      setStatusMessage('Failed to refresh insights: ' + err.response?.data?.message || err.message)
     }
   }
+
+  const stopPolling = () => {
+    if (pollingInterval) {
+      clearInterval(pollingInterval)
+      setPollingInterval(null)
+    }
+  }
+
+  // Clean up interval on unmount
+  React.useEffect(() => {
+    return () => {
+      if (pollingInterval) {
+        clearInterval(pollingInterval)
+      }
+    }
+  }, [pollingInterval])
 
   const displayNotebookInsights = () => {
     if (!notebookInsights) return null
@@ -108,12 +126,12 @@ const InsightsNotebookControls = ({ onInsightsLoaded }) => {
         borderRadius: '8px',
         border: '1px solid #c3e6c3'
       }}>
-        <h4>📊 Insights from Notebook Execution</h4>
+        <h4>📊 Insights from {notebookInsights.source === 'notebook_output' ? 'Notebook Execution' : 'Database Tables'}</h4>
         
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginTop: '15px' }}>
           {/* Top Products */}
           <div>
-            <h5>Top Products (From Notebook)</h5>
+            <h5>Top Products</h5>
             {notebookInsights.top_products && notebookInsights.top_products.length > 0 ? (
               <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
                 {notebookInsights.top_products.map((product, index) => (
@@ -139,7 +157,7 @@ const InsightsNotebookControls = ({ onInsightsLoaded }) => {
 
           {/* Sales by Country */}
           <div>
-            <h5>Sales by Country (From Notebook)</h5>
+            <h5>Sales by Country</h5>
             {notebookInsights.sales_by_country && notebookInsights.sales_by_country.length > 0 ? (
               <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
                 {notebookInsights.sales_by_country.map((country, index) => (
@@ -164,21 +182,10 @@ const InsightsNotebookControls = ({ onInsightsLoaded }) => {
           </div>
         </div>
 
-        {/* Raw output for debugging */}
-        <details style={{ marginTop: '15px' }}>
-          <summary>Debug Information</summary>
-          <pre style={{ 
-            background: '#f8f9fa', 
-            padding: '10px', 
-            borderRadius: '4px', 
-            fontSize: '12px',
-            maxHeight: '150px',
-            overflow: 'auto'
-          }}>
-            Run ID: {currentRunId}
-            {notebookInsights && JSON.stringify(notebookInsights, null, 2)}
-          </pre>
-        </details>
+        {/* Source information */}
+        <div style={{ marginTop: '10px', fontSize: '0.9em', color: '#666' }}>
+          Source: {notebookInsights.source} | Run ID: {currentRunId}
+        </div>
       </div>
     )
   }
@@ -190,22 +197,58 @@ const InsightsNotebookControls = ({ onInsightsLoaded }) => {
         Run the actual Insights notebook from Databricks and display its output
       </p>
       
-      <button 
-        onClick={runInsightsNotebook}
-        disabled={insightsStatus === 'running'}
-        style={{
-          background: insightsStatus === 'running' ? '#6c757d' : '#17a2b8',
-          color: 'white',
-          border: 'none',
-          padding: '12px 24px',
-          borderRadius: '5px',
-          cursor: insightsStatus === 'running' ? 'not-allowed' : 'pointer',
-          fontSize: '1em',
-          fontWeight: 'bold'
-        }}
-      >
-        {insightsStatus === 'running' ? '🔄 Running Insights Notebook...' : '🚀 Run Insights Notebook'}
-      </button>
+      <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '15px' }}>
+        <button 
+          onClick={runInsightsNotebook}
+          disabled={insightsStatus === 'running' || insightsStatus === 'starting'}
+          style={{
+            background: (insightsStatus === 'running' || insightsStatus === 'starting') ? '#6c757d' : '#17a2b8',
+            color: 'white',
+            border: 'none',
+            padding: '12px 24px',
+            borderRadius: '5px',
+            cursor: (insightsStatus === 'running' || insightsStatus === 'starting') ? 'not-allowed' : 'pointer',
+            fontSize: '1em',
+            fontWeight: 'bold'
+          }}
+        >
+          {insightsStatus === 'running' ? '🔄 Running...' : 
+           insightsStatus === 'starting' ? '🚀 Starting...' : '🚀 Run Insights Notebook'}
+        </button>
+        
+        <button 
+          onClick={refreshInsights}
+          disabled={insightsStatus === 'refreshing'}
+          style={{
+            background: insightsStatus === 'refreshing' ? '#6c757d' : '#28a745',
+            color: 'white',
+            border: 'none',
+            padding: '12px 24px',
+            borderRadius: '5px',
+            cursor: insightsStatus === 'refreshing' ? 'not-allowed' : 'pointer',
+            fontSize: '1em'
+          }}
+        >
+          {insightsStatus === 'refreshing' ? '🔄 Refreshing...' : '🔄 Refresh Insights'}
+        </button>
+
+        {(insightsStatus === 'running' || insightsStatus === 'starting') && (
+          <button 
+            onClick={stopPolling}
+            style={{
+              background: '#dc3545',
+              color: 'white',
+              border: 'none',
+              padding: '12px 24px',
+              borderRadius: '5px',
+              cursor: 'pointer',
+              fontSize: '1em'
+            }}
+          >
+            ⏹️ Stop Polling
+          </button>
+        )}
+      </div>
       
       {statusMessage && (
         <div style={{
@@ -214,19 +257,21 @@ const InsightsNotebookControls = ({ onInsightsLoaded }) => {
           borderRadius: '5px',
           background: insightsStatus === 'success' ? '#d4edda' : 
                      insightsStatus === 'error' ? '#f8d7da' : 
-                     insightsStatus === 'running' ? '#fff3cd' : '#e2e3e5',
+                     insightsStatus === 'running' || insightsStatus === 'starting' || insightsStatus === 'refreshing' ? '#fff3cd' : '#e2e3e5',
           color: insightsStatus === 'success' ? '#155724' : 
                 insightsStatus === 'error' ? '#721c24' : 
-                insightsStatus === 'running' ? '#856404' : '#383d41',
+                insightsStatus === 'running' || insightsStatus === 'starting' || insightsStatus === 'refreshing' ? '#856404' : '#383d41',
           border: `1px solid ${
             insightsStatus === 'success' ? '#c3e6cb' : 
             insightsStatus === 'error' ? '#f5c6cb' : 
-            insightsStatus === 'running' ? '#ffeaa7' : '#d6d8db'
+            insightsStatus === 'running' || insightsStatus === 'starting' || insightsStatus === 'refreshing' ? '#ffeaa7' : '#d6d8db'
           }`
         }}>
           {insightsStatus === 'running' && '🔄 '}
+          {insightsStatus === 'starting' && '🚀 '}
           {insightsStatus === 'success' && '✅ '}
           {insightsStatus === 'error' && '❌ '}
+          {insightsStatus === 'refreshing' && '🔄 '}
           {statusMessage}
         </div>
       )}

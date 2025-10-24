@@ -1,7 +1,7 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from routes.pipeline_fixed import pipeline_bp
-from routes.insights_fixed import insights_bp
+from routes.pipeline_fixed_schema import pipeline_bp
+from routes.insights_fixed_schema import insights_bp
 import logging
 import os
 from dotenv import load_dotenv
@@ -22,10 +22,11 @@ def health_check():
 @app.route('/api/databricks-config', methods=['GET'])
 def get_databricks_config():
     """Check if Databricks is properly configured"""
-    from config.databricks_config import db_config
+    from config.databricks_config_fixed import db_config
     return jsonify({
         "configured": db_config.is_configured(),
         "server_hostname": db_config.server_hostname,
+        "schema": db_config.schema,
         "has_http_path": bool(db_config.http_path),
         "has_access_token": bool(db_config.access_token)
     })
